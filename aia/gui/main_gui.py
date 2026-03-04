@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 import sys
 
-from PySide6.QtCore import QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect, Qt, QTimer, Signal, QVariantAnimation
+# Выбран корректный импорт QEvent для обработки событий мыши
+from PySide6.QtCore import (
+    QEasingCurve, QObject, QPoint, QPropertyAnimation, 
+    QRect, Qt, QTimer, Signal, QVariantAnimation, QEvent
+)
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QApplication, QGraphicsDropShadowEffect, QMainWindow, QWidget
 
@@ -16,22 +20,24 @@ from aia.shared.message_protocol import Message, MessageType, build_message
 
 try:
     import keyboard
-except ImportError:  # optional runtime dependency
+except ImportError:  # Опциональная зависимость
     keyboard = None
 
 
 class EventBus(QObject):
+    """Шина для безопасной передачи сообщений из потока IPC в GUI поток."""
     message = Signal(object)
 
 
 class FlashOverlay(QWidget):
+    """Визуальный эффект красной вспышки при Kill Switch."""
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self.setStyleSheet("background: rgba(239,68,68,0.0); border-radius: 14px;")
         self.hide()
 
-    def resizeEvent(self, event) -> None:  # type: ignore[override]
+    def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         if self.parentWidget():
             self.setGeometry(self.parentWidget().rect())
@@ -43,7 +49,9 @@ class FlashOverlay(QWidget):
         anim.setDuration(280)
         anim.setStartValue(0.32)
         anim.setEndValue(0.0)
-        anim.valueChanged.connect(lambda v: self.setStyleSheet(f"background: rgba(239,68,68,{float(v):.3f}); border-radius: 14px;"))
+        anim.valueChanged.connect(lambda v: self.setStyleSheet(
+            f"background: rgba(239,68,68,{float(v):.3f}); border-radius: 14px;"
+        ))
         anim.finished.connect(self.hide)
         anim.start()
         self._anim = anim
@@ -60,7 +68,8 @@ class MainWindow(QMainWindow):
         self._drag_offset = QPoint()
 
         self.setWindowTitle("AIA Desktop Assistant")
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Window)
+        # Убираем рамки, делаем окно всегда поверх остальных
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
 
         self.widget = ChatWidget()
@@ -69,6 +78,7 @@ class MainWindow(QMainWindow):
 
         self.overlay = FlashOverlay(self.widget.root_panel)
 
+        # Эффект свечения (Glow)
         self.shadow = QGraphicsDropShadowEffect(self)
         self.shadow.setBlurRadius(42)
         self.shadow.setOffset(0, 10)
@@ -78,6 +88,7 @@ class MainWindow(QMainWindow):
         self.bus = EventBus()
         self.bus.message.connect(self._process_message)
 
+        # IPC Клиент для связи с Агентом
         self.ipc = IPCClient(host, port, on_message=lambda m: self.bus.message.emit(m))
         self.widget.set_connection(True)
         try:
@@ -88,6 +99,7 @@ class MainWindow(QMainWindow):
         self.tray = TrayController(self.showNormal, self._change_mode, self._kill_switch, self._exit_app)
         self.tray.start(self._mode)
 
+        # Привязка UI к логике
         self.widget.send_button.clicked.connect(self._send_command)
         self.widget.mode_switcher.currentTextChanged.connect(self._change_mode)
         self.widget.kill_button.clicked.connect(self._kill_switch)
@@ -95,6 +107,7 @@ class MainWindow(QMainWindow):
 
         self.widget.top_bar.installEventFilter(self)
 
+        # Таймер "дышащей" подсветки
         self._breath_timer = QTimer(self)
         self._breath_timer.timeout.connect(self._pulse_glow)
         self._breath_phase = 0
@@ -105,12 +118,13 @@ class MainWindow(QMainWindow):
         if keyboard is not None:
             keyboard.add_hotkey("ctrl+alt+x", self._kill_switch)
 
-    def eventFilter(self, watched, event):  # type: ignore[override]
+    def eventFilter(self, watched, event):
+        """Реализация перетаскивания безрамочного окна."""
         if watched is self.widget.top_bar:
-            if event.type() == event.MouseButtonPress and event.button() == Qt.LeftButton:
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.LeftButton:
                 self._drag_offset = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
                 return True
-            if event.type() == event.MouseMove and event.buttons() & Qt.LeftButton:
+            if event.type() == QEvent.Type.MouseMove and event.buttons() & Qt.LeftButton:
                 self.move(event.globalPosition().toPoint() - self._drag_offset)
                 return True
         return super().eventFilter(watched, event)
@@ -132,6 +146,7 @@ class MainWindow(QMainWindow):
         self.ipc.send(build_message(MessageType.MODE_CHANGE, {"mode": mode}))
 
     def _apply_mode_theme(self, mode: str, immediate: bool) -> None:
+        """Смена темы (цвета акцента) в зависимости от режима."""
         old = self._mode
         self._mode = mode
         self.tray.update_mode(mode)
@@ -155,21 +170,19 @@ class MainWindow(QMainWindow):
         self._mode_anim = anim
 
     def _toggle_pill_mode(self) -> None:
+        """Морфинг окна в компактную форму (пилюлю)."""
         self._is_pill = not self._is_pill
         start = self.geometry()
+        
+        # Скрываем элементы при сворачивании
+        controls = [self.widget.chat_history, self.widget.logs, self.widget.input_box, 
+                    self.widget.send_button, self.widget.kill_button]
+        
         if self._is_pill:
-            self.widget.chat_history.hide()
-            self.widget.logs.hide()
-            self.widget.input_box.hide()
-            self.widget.send_button.hide()
-            self.widget.kill_button.hide()
+            for c in controls: c.hide()
             target = QRect(self.x(), self.y(), *self.PILL_SIZE)
         else:
-            self.widget.chat_history.show()
-            self.widget.logs.show()
-            self.widget.input_box.show()
-            self.widget.send_button.show()
-            self.widget.kill_button.show()
+            for c in controls: c.show()
             target = QRect(self.x(), self.y(), *self.PANEL_SIZE)
 
         morph = QPropertyAnimation(self, b"geometry", self)
@@ -181,6 +194,7 @@ class MainWindow(QMainWindow):
         self._morph_anim = morph
 
     def _kill_switch(self) -> None:
+        """Экстренная остановка всего."""
         self.overlay.flash()
         self.widget.chat_history.clear()
         self.widget.logs.append("🛑 PANIC: execution stopped, switched to PASSIVE")
@@ -190,19 +204,22 @@ class MainWindow(QMainWindow):
         self.ipc.send(build_message(MessageType.KILL_SIGNAL, {"source": "gui"}))
 
     def _pulse_glow(self) -> None:
+        """Анимация свечения тени."""
         color = QColor(MODE_THEMES[self._mode].accent)
         self._breath_phase = (self._breath_phase + 1) % 60
         alpha = 90 + int(65 * abs(30 - self._breath_phase) / 30)
         self.shadow.setColor(QColor(color.red(), color.green(), color.blue(), alpha))
 
     def _process_message(self, message: Message) -> None:
-        if message.message_type == MessageType.PLAN_RESULT:
+        """Обработка входящих JSON-пакетов от Агента."""
+        m_type = message.message_type
+        if m_type == MessageType.PLAN_RESULT:
             self.widget.append_agent_message(f"Plan generated: {json.dumps(message.payload, ensure_ascii=False)}")
-        elif message.message_type == MessageType.EXECUTE_STEP:
+        elif m_type == MessageType.EXECUTE_STEP:
             self.widget.logs.append(f"EXECUTE: {json.dumps(message.payload, ensure_ascii=False)}")
-        elif message.message_type == MessageType.LOG_UPDATE:
+        elif m_type == MessageType.LOG_UPDATE:
             self.widget.logs.append(f"LOG: {json.dumps(message.payload, ensure_ascii=False)}")
-        elif message.message_type == MessageType.STATUS_UPDATE:
+        elif m_type == MessageType.STATUS_UPDATE:
             mode = message.payload.get("mode", "PASSIVE")
             idx = self.widget.mode_switcher.findText(mode)
             if idx >= 0:
@@ -210,10 +227,11 @@ class MainWindow(QMainWindow):
                 self.widget.mode_switcher.setCurrentIndex(idx)
                 self.widget.mode_switcher.blockSignals(False)
             self._apply_mode_theme(mode, immediate=False)
-        elif message.message_type == MessageType.REQUEST_CONFIRMATION:
+        elif m_type == MessageType.REQUEST_CONFIRMATION:
             self._show_confirmation(message)
 
     def _show_confirmation(self, message: Message) -> None:
+        """Окно подтверждения критического действия."""
         step = message.payload.get("step", {})
         dlg = ConfirmationDialog(
             "Critical Action Confirmation",
