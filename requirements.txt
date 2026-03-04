@@ -1,0 +1,9 @@
+PySide6
+pystray
+pillow
+requests
+pyautogui
+pywin32
+keyboard
+vosk
+sounddevice
